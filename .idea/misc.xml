@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="Black">
+    <option name="sdkName" value="DWG-PDF-exp" />
+  </component>
+  <component name="ProjectRootManager" version="2" project-jdk-name="DWG-PDF-exp" project-jdk-type="Python SDK" />
+</project>
