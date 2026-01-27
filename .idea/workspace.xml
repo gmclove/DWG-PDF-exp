@@ -4,7 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="36a79711-050f-40f3-9b39-31293afb1351" name="Changes" comment="day 1 development">
+    <list default="true" id="36a79711-050f-40f3-9b39-31293afb1351" name="Changes" comment="day 2, title block scanner working but too slow">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
     </list>
@@ -114,7 +114,15 @@
       <option name="project" value="LOCAL" />
       <updated>1768341141605</updated>
     </task>
-    <option name="localTasksCounter" value="4" />
+    <task id="LOCAL-00004" summary="day 2, title block scanner working but too slow">
+      <option name="closed" value="true" />
+      <created>1769550075944</created>
+      <option name="number" value="00004" />
+      <option name="presentableId" value="LOCAL-00004" />
+      <option name="project" value="LOCAL" />
+      <updated>1769550075944</updated>
+    </task>
+    <option name="localTasksCounter" value="5" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -130,6 +138,7 @@
   </component>
   <component name="VcsManagerConfiguration">
     <MESSAGE value="day 1 development" />
-    <option name="LAST_COMMIT_MESSAGE" value="day 1 development" />
+    <MESSAGE value="day 2, title block scanner working but too slow" />
+    <option name="LAST_COMMIT_MESSAGE" value="day 2, title block scanner working but too slow" />
   </component>
 </project>
