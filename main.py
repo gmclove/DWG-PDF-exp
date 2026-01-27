@@ -260,6 +260,18 @@ class AutoCADPdfConverter:
                 except Exception as e:
                     print(f"    ! Failed to plot layout '{name}': {e}")
 
+
+                # Read title block after activation
+                sheet_no, sheet_name, revision = read_titleblock_from_active_layout(
+                    doc,
+                    sheet_top_tag="FC-E",  # your top number tag
+                    sheet_bottom_tag="442C",  # your bottom number tag
+                    title_tags=("ELECTRICAL", "TITLE2", "TITLE3", "TITLE4", "TITLE5"),
+                    sheetno_sep="-",
+                    title_joiner=" | ",
+                    debug=True  # set True to inspect block scoring
+                )
+
         finally:
             if doc is not None:
                 self.close_document(doc, save=False)
@@ -415,6 +427,203 @@ def save_sheet_list(df: pd.DataFrame, output_dir: Path, project_name: str):
         print(f"✓ Sheet List (Excel) saved: {xlsx_path.name}")
     except Exception:
         print("    ! Excel export skipped (openpyxl not installed or write error).")
+
+
+def normalize_tag(tag: str) -> str:
+    """
+    Normalize attribute tag names (e.g., 'FC-E' -> 'FCE').
+    Removes all non-alphanumeric chars and uppercases.
+    """
+    return re.sub(r'[^A-Z0-9]', '', (tag or "").strip().upper())
+
+
+def read_titleblock_from_active_layout(
+        doc,
+        *,
+        sheet_top_tag="FC-E",
+        sheet_bottom_tag="442C",
+        title_tags=("ELECTRICAL", "TITLE2", "TITLE3", "TITLE4", "TITLE5"),
+        sheetno_sep="-",
+        title_joiner=" | ",
+        debug=False
+):
+    """
+    Read the sheet-specific title block on the ACTIVE layout (PaperSpace).
+
+    Selection logic:
+      - Iterate all PaperSpace entities with attributes.
+      - For each entity (i.e., each candidate block), compute a "match score"
+        against your known sheet tags (FC-E, 442C, ELECTRICAL, TITLE2..5, R#NO).
+      - Pick the block with the highest score (this avoids project-level XREFs).
+
+    Returns:
+      (sheet_no: str, sheet_name: str, revision: str[, debug_info: dict if debug=True])
+
+    Requirements:
+      - Call this AFTER activating the layout: com_set(doc, "ActiveLayout", layout)
+      - Uses global helpers: com_get, com_call
+    """
+    TAG_SHEET_TOP = normalize_tag(sheet_top_tag)
+    TAG_SHEET_BOTTOM = normalize_tag(sheet_bottom_tag)
+    TITLE_TAGS_IN_ORDER = [normalize_tag(t) for t in title_tags]
+
+    # Defaults
+    sheet_no = "Not Found"
+    sheet_name = "Not Found"
+    revision = "Not Found"
+
+    # Collect per-block scoring info (for optional debug)
+    dbg_blocks = []
+
+    # Access PaperSpace
+    try:
+        ps = com_get(doc, "PaperSpace")
+    except Exception:
+        return (sheet_no, sheet_name, revision, {"error": "No PaperSpace"}) if debug else (sheet_no, sheet_name,
+                                                                                           revision)
+
+    # Enumerate entities
+    try:
+        count = com_get(ps, "Count")
+    except Exception:
+        count = None
+
+    def collect_attrs(ent):
+        """Return list of (tag_norm, value_str) for a single entity with attributes."""
+        out = []
+        try:
+            has_attrs = com_get(ent, "HasAttributes")
+            if not has_attrs:
+                return out
+            attr_objs = com_call(ent, "GetAttributes")
+        except Exception:
+            return out
+
+        for a in attr_objs:
+            try:
+                tag = normalize_tag(com_get(a, "TagString"))
+                val = (com_get(a, "TextString") or "").strip()
+                out.append((tag, val))
+            except Exception:
+                continue
+        return out
+
+    def score_block(attrs):
+        """
+        Score a block's attributes against expected sheet tags.
+        Higher = more likely to be the sheet-specific title block.
+        """
+        score = 0
+        top_val = ""
+        bottom_val = ""
+        titles = {t: "" for t in TITLE_TAGS_IN_ORDER}
+        rev_map = {}  # {int: str} from R#NO
+
+        for tag, val in attrs:
+            if not val:
+                continue
+            # Sheet No parts (heavier weight)
+            if tag == TAG_SHEET_TOP and not top_val:
+                top_val = val
+                score += 3
+            elif tag == TAG_SHEET_BOTTOM and not bottom_val:
+                bottom_val = val
+                score += 3
+
+            # Title lines (light weight per hit)
+            if tag in titles and not titles[tag]:
+                titles[tag] = val
+                score += 1
+
+            # Revision hits: R#NO where # is largest if present
+            m = re.match(r'^R(\d+)NO$', tag)
+            if m and val:
+                try:
+                    idx = int(m.group(1))
+                    rev_map[idx] = val
+                    score += 1
+                except Exception:
+                    pass
+
+        return score, top_val, bottom_val, titles, rev_map
+
+    best = {
+        "score": -1,
+        "top": "",
+        "bottom": "",
+        "titles": {t: "" for t in TITLE_TAGS_IN_ORDER},
+        "rev_map": {},
+        "attrs_count": 0
+    }
+
+    def consider_entity(ent):
+        nonlocal best
+        attrs = collect_attrs(ent)
+        if not attrs:
+            return
+        score, top, bottom, titles, rev_map = score_block(attrs)
+        # Prefer higher score; tie-breaker by number of attributes (more = better heuristic)
+        if (score > best["score"]) or (score == best["score"] and len(attrs) > best["attrs_count"]):
+            best = {
+                "score": score,
+                "top": top,
+                "bottom": bottom,
+                "titles": titles,
+                "rev_map": rev_map,
+                "attrs_count": len(attrs)
+            }
+        if debug:
+            dbg_blocks.append({
+                "score": score,
+                "attrs": attrs[:50],  # cap for readability
+                "top": top,
+                "bottom": bottom,
+                "titles": titles,
+                "rev_map": rev_map
+            })
+
+    if count is not None:
+        for i in range(count):
+            try:
+                ent = com_call(ps, "Item", i)
+            except Exception:
+                continue
+            consider_entity(ent)
+    else:
+        try:
+            for ent in ps:
+                consider_entity(ent)
+        except Exception:
+            pass
+
+    # Compose final values from best block
+    top = best["top"]
+    bottom = best["bottom"]
+    if top and bottom:
+        sheet_no = f"{top}{sheetno_sep}{bottom}"
+    elif top:
+        sheet_no = top
+    elif bottom:
+        sheet_no = bottom
+
+    ordered_titles = [best["titles"][t] for t in TITLE_TAGS_IN_ORDER if best["titles"][t]]
+    if ordered_titles:
+        sheet_name = title_joiner.join(ordered_titles)
+
+    if best["rev_map"]:
+        revision = best["rev_map"][max(best["rev_map"].keys())]
+
+    if debug:
+        # Print a small preview; or write to a log file if you prefer
+        try:
+            chosen = best
+            print(f"[TB-DEBUG] Score={chosen['score']} Top={chosen['top']} Bottom={chosen['bottom']} "
+                  f"Titles={[chosen['titles'][t] for t in TITLE_TAGS_IN_ORDER if chosen['titles'][t]]} "
+                  f"MaxRev={max(chosen['rev_map'].keys()) if chosen['rev_map'] else 'None'}")
+        except Exception:
+            pass
+
+    return sheet_no, sheet_name, revision
 
 
 # =========================
