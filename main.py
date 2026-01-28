@@ -238,6 +238,22 @@ class AutoCADPdfConverter:
                         print(f"    ! Could not activate layout '{name}'")
                         continue
 
+                # Read TB (fast path with your known block name(s); fallback works too if you pass None)
+                sheet_no, sheet_title, rev_no, rev_date, rev_desc, rev_by, other_attrs = read_titleblock_from_active_layout_robust(
+                    doc,
+                    target_block_names=TARGET_BLOCKS,  # or None to use scoring-only
+                    sheet_top_tags=("FC-E",),  # include any alternates here if needed
+                    sheet_bottom_tags=("442C",),
+                    title_tag_primary=("TITLE_1", "TITLE_2", "TITLE_3", "TITLE_4", "TITLE_5"),
+                    title_tag_aliases=("ELECTRICAL",),  # alias for TITLE_1 seen in your sample
+                    revision_index_range=range(0, 10),  # supports R0..R9 if needed
+                    sheetno_sep="-",
+                    title_joiner=" "
+                )
+
+
+
+
                 pdf_name = f"{dwg_path.stem}__{sanitize_filename(name)}.pdf"
                 pdf_path = out_dir / pdf_name
 
@@ -261,8 +277,6 @@ class AutoCADPdfConverter:
                     print(f"    ! Failed to plot layout '{name}': {e}")
 
 
-                # Read title block after activation
-                sheet_no, sheet_name, revision = read_titleblock_from_active_layout_fast(doc)
 
         finally:
             if doc is not None:
@@ -428,111 +442,261 @@ def normalize_tag(tag: str) -> str:
     """
     return re.sub(r'[^A-Z0-9]', '', (tag or "").strip().upper())
 
-def read_titleblock_from_active_layout_fast(doc):
+def _norm_tag(s: str) -> str:
+    """Normalize attribute tag names for matching (upper + strip non-alnum)."""
+    return re.sub(r'[^A-Z0-9]', '', (s or '').upper())
+
+def _norm_name(s: str) -> str:
+    """Normalize block names (upper, trimmed)."""
+    return (s or '').upper().strip()
+
+def read_titleblock_from_active_layout_robust(
+    doc,
+    *,
+    # 1) FAST PATH: If you know the exact block name(s) for the sheet title block, put them here (UPPERCASE).
+    # You can include multiple names if you have several templates.
+    target_block_names: set[str] | None = None,
+    # 2) SHEET NUMBER: known tags (by TAG name, not prompt)
+    sheet_top_tags=("FC-E", "TOPNUMBER", "TOP_NUM", "TOP"),
+    sheet_bottom_tags=("442C", "BOTTOMNUMBER", "BOTTOM_NUM", "BOTTOM"),
+    # 3) SHEET TITLE: accept TITLE_1..TITLE_5 (primary), and fallback aliases
+    title_tag_primary=("TITLE_1", "TITLE_2", "TITLE_3", "TITLE_4", "TITLE_5"),
+    title_tag_aliases=("ELECTRICAL",),  # alias for TITLE_1 seen in your example
+    # 4) REVISION fields: R#NO, R#DATE, R#DESC, R#BY (we will scan 0..9 by default)
+    revision_index_range=range(0, 10),
+    # 5) Formatting
+    sheetno_sep="-",
+    title_joiner=" ",
+) -> tuple[str, str, str, str, str, str, dict]:
     """
-    Fast scanner: ONLY examines block references whose block name matches the
-    sheet-specific title block. Ignores the project-wide XREF block entirely.
+    Read the sheet-specific title block attributes on the ACTIVE layout (PaperSpace).
+
+    Returns **exactly** 7 values:
+        (sheet_no, sheet_title, rev_no, rev_date, rev_desc, rev_by, other_attrs_dict)
+
+    - Uses fast block-name filtering if target_block_names is provided.
+    - Otherwise uses scoring against known sheet tags & revision patterns.
+    - Skips XREF blocks.
+    - 'other_attrs_dict' includes all attributes from the chosen sheet block
+      EXCLUDING the ones used for sheet number, title lines, and revision.
+
+    IMPORTANT: Call this only AFTER activating the layout:
+        com_set(doc, "ActiveLayout", layout)
     """
 
-    # <<<< UPDATE THIS TO MATCH YOUR BLOCK NAME >>>>
-    TARGET_BLOCK_NAMES = {
-        "GF MALTA TITLE BLOCK 30X42-TB-ATT",   # uppercase version
-    }
+    # Normalize configuration
+    sheet_top_norm = {_norm_tag(t) for t in sheet_top_tags}
+    sheet_bot_norm = {_norm_tag(t) for t in sheet_bottom_tags}
 
-    # Normalize function
-    def norm(s): return re.sub(r'[^A-Z0-9]', '', (s or "").upper())
+    title_primary_norm = [_norm_tag(t) for t in title_tag_primary]  # ordered
+    title_alias_norm = {_norm_tag(t) for t in title_tag_aliases}
 
-    TAG_SHEET_TOP = norm("FC-E")
-    TAG_SHEET_BOTTOM = norm("442C")
-    TITLE_TAGS = [norm(t) for t in ["ELECTRICAL", "TITLE2", "TITLE3", "TITLE4", "TITLE5"]]
+    target_block_names_norm = {_norm_name(n) for n in (target_block_names or set())} if target_block_names else None
 
-    sheet_top = ""
-    sheet_bottom = ""
-    titles = {t: "" for t in TITLE_TAGS}
-    rev_map = {}
+    # Outputs
+    sheet_no = "Not Found"
+    sheet_title = "Not Found"
+    rev_no = "Not Found"
+    rev_date = "Not Found"
+    rev_desc = "Not Found"
+    rev_by = "Not Found"
+    other_attrs: dict[str, str] = {}
 
+    # Access PaperSpace
     try:
         ps = com_get(doc, "PaperSpace")
-        count = com_get(ps, "Count")
-    except:
-        return "Not Found", "Not Found", "Not Found"
+        ps_count = com_get(ps, "Count")
+    except Exception:
+        return sheet_no, sheet_title, rev_no, rev_date, rev_desc, rev_by, other_attrs
 
-    for i in range(count):
-        try:
-            ent = com_call(ps, "Item", i)
-        except:
-            continue
+    # Collector for best candidate block (scoring fallback)
+    best = {
+        "score": -1,
+        "attrs_raw": [],           # list of (raw_tag, norm_tag, value)
+        "top": "",
+        "bot": "",
+        "titles": {t: "" for t in title_primary_norm},  # TITLE1..TITLE5 norm keys
+        "revs": {},               # idx -> {"NO":..., "DATE":..., "DESC":..., "BY":...}
+        "attrs_count": 0,
+        "blkname": "",
+    }
 
-        # Skip entities without a block name
-        try:
-            blkname = com_get(ent, "Name")
-        except:
-            continue
-
-        # Normalize name
-        blkname_norm = blkname.upper().strip()
-
-        # If block name doesn't match our title block, skip immediately
-        if blkname_norm not in TARGET_BLOCK_NAMES:
-            continue
-
-        # Skip XREF title block (AutoCAD marks XREF insertions)
-        try:
-            if com_get(ent, "IsXRef"):
-                continue
-        except:
-            pass
-
-        # Only now read attributes
+    def collect_attrs(ent):
+        """Return [(raw_tag, norm_tag, value_str)] for an entity with attributes."""
+        out = []
         try:
             if not com_get(ent, "HasAttributes"):
-                continue
-            attrs = com_call(ent, "GetAttributes")
-        except:
-            continue
-
-        for a in attrs:
+                return out
+            arr = com_call(ent, "GetAttributes")
+        except Exception:
+            return out
+        for a in arr:
             try:
-                tag = norm(com_get(a, "TagString"))
+                raw_tag = com_get(a, "TagString") or ""
+                norm_tag = _norm_tag(raw_tag)
                 val = (com_get(a, "TextString") or "").strip()
-            except:
+                out.append((raw_tag, norm_tag, val))
+            except Exception:
                 continue
+        return out
 
+    def analyze_block(attrs_raw):
+        """
+        Compute score and extract sheet parts, titles, revisions.
+        """
+        score = 0
+        top, bot = "", ""
+        titles = {t: "" for t in title_primary_norm}
+        revs = {}  # idx -> dict
+
+        # Map raw tags for potential title alias mapping
+        # e.g., ELECTRICAL -> TITLE_1
+        for raw_tag, norm_tag, val in attrs_raw:
             if not val:
                 continue
 
-            if tag == TAG_SHEET_TOP and not sheet_top:
-                sheet_top = val
-            elif tag == TAG_SHEET_BOTTOM and not sheet_bottom:
-                sheet_bottom = val
-            elif tag in titles and not titles[tag]:
-                titles[tag] = val
-            else:
-                # Revision tags like R2NO, R3NO
-                m = re.match(r'^R(\d+)NO$', tag)
-                if m:
-                    idx = int(m.group(1))
-                    rev_map[idx] = val
+            # Sheet number parts
+            if norm_tag in sheet_top_norm and not top:
+                top = val; score += 3
+            elif norm_tag in sheet_bot_norm and not bot:
+                bot = val; score += 3
 
-        # Since this block is the one we want, break immediately – we are done
-        break
+            # Title lines - primary tags first
+            if norm_tag in titles and not titles[norm_tag]:
+                titles[norm_tag] = val; score += 1
+                continue
 
-    # Compose final outputs
-    if sheet_top and sheet_bottom:
-        sheet_no = f"{sheet_top}-{sheet_bottom}"
-    elif sheet_top:
-        sheet_no = sheet_top
-    elif sheet_bottom:
-        sheet_no = sheet_bottom
-    else:
-        sheet_no = "Not Found"
+        # Second pass for title aliases
+        for raw_tag, norm_tag, val in attrs_raw:
+            if not val:
+                continue
+            if norm_tag in title_alias_norm:
+                # Map alias to TITLE_1 (first position) if still empty
+                t1 = title_primary_norm[0] if title_primary_norm else None
+                if t1 and not titles[t1]:
+                    titles[t1] = val
+                    score += 1
 
-    ordered_title_list = [titles[t] for t in TITLE_TAGS if titles[t]]
-    sheet_name = " | ".join(ordered_title_list) if ordered_title_list else "Not Found"
+        # Revisions
+        for raw_tag, norm_tag, val in attrs_raw:
+            if not val:
+                continue
+            # Match R#NO / R#DATE / R#DESC / R#BY
+            m = re.match(r'^R(\d+)(NO|DATE|DESC|BY)$', norm_tag)
+            if m:
+                idx = int(m.group(1))
+                kind = m.group(2)
+                if idx in revision_index_range:
+                    if idx not in revs:
+                        revs[idx] = {"NO": "", "DATE": "", "DESC": "", "BY": ""}
+                    revs[idx][kind] = val
+                    # Each present field adds a small score
+                    score += 1
 
-    revision = rev_map[max(rev_map.keys())] if rev_map else "Not Found"
+        return score, top, bot, titles, revs
 
-    return sheet_no, sheet_name, revision
+    def consider_entity(ent):
+        """
+        Check entity by name filter, XREF, then score attributes.
+        Update global 'best' if this block is a better match.
+        """
+        nonlocal best
+        # Name filter (fast path)
+        try:
+            blkname = com_get(ent, "Name") or ""
+        except Exception:
+            blkname = ""
+        blkname_norm = _norm_name(blkname)
+
+        # XREF skip (project-wide TB)
+        try:
+            if com_get(ent, "IsXRef"):
+                return
+        except Exception:
+            pass
+
+        # If specific block names were provided, enforce them
+        if target_block_names_norm is not None:
+            if blkname_norm not in target_block_names_norm:
+                return
+
+        # Must have attributes
+        attrs_raw = collect_attrs(ent)
+        if not attrs_raw:
+            return
+
+        score, top, bot, titles, revs = analyze_block(attrs_raw)
+
+        # Prefer higher score; tie-breaker by number of attributes (bigger block)
+        if (score > best["score"]) or (score == best["score"] and len(attrs_raw) > best["attrs_count"]):
+            best = {
+                "score": score,
+                "attrs_raw": attrs_raw,
+                "top": top,
+                "bot": bot,
+                "titles": titles,
+                "revs": revs,
+                "attrs_count": len(attrs_raw),
+                "blkname": blkname,
+            }
+
+    # Iterate PaperSpace entities (once)
+    for i in range(ps_count):
+        try:
+            ent = com_call(ps, "Item", i)
+        except Exception:
+            continue
+        consider_entity(ent)
+        # Optimization: if fast path and we already matched one, we could break
+        # but keep scanning in case there are multiple inserts—use the best score.
+
+    # No candidate found → return defaults
+    if best["score"] < 0:
+        return sheet_no, sheet_title, rev_no, rev_date, rev_desc, rev_by, other_attrs
+
+    # Build sheet number
+    if best["top"] and best["bot"]:
+        sheet_no = f"{best['top']}{sheetno_sep}{best['bot']}"
+    elif best["top"]:
+        sheet_no = best["top"]
+    elif best["bot"]:
+        sheet_no = best["bot"]
+
+    # Build sheet title (TITLE_1..TITLE_5 in order)
+    title_values = [best["titles"][t] for t in title_primary_norm if best["titles"][t]]
+    sheet_title = title_joiner.join(title_values) if title_values else sheet_title
+
+    # Pick highest revision index that has NO
+    if best["revs"]:
+        max_idx = max((idx for idx, d in best["revs"].items() if d.get("NO")), default=None)
+        if max_idx is not None:
+            d = best["revs"][max_idx]
+            rev_no = d.get("NO") or rev_no
+            rev_date = d.get("DATE") or rev_date
+            rev_desc = d.get("DESC") or rev_desc
+            rev_by = d.get("BY") or rev_by
+
+    # Build 'other_attrs' = all attributes not used for sheet number, title, revision
+    used_norm_tags = set()
+    used_norm_tags |= sheet_top_norm
+    used_norm_tags |= sheet_bot_norm
+    used_norm_tags |= set(title_primary_norm) | set(title_alias_norm)
+    # Add revision tag patterns R#NO/DATE/DESC/BY explicitly
+    for idx in revision_index_range:
+        for kind in ("NO", "DATE", "DESC", "BY"):
+            used_norm_tags.add(_norm_tag(f"R{idx}{kind}"))
+
+    # other_attrs uses RAW TAG NAMES as column headers
+    for raw_tag, norm_tag, val in best["attrs_raw"]:
+        if not val:
+            continue
+        if norm_tag in used_norm_tags:
+            continue
+        # Keep the first occurrence of each raw tag
+        if raw_tag not in other_attrs:
+            other_attrs[raw_tag] = val
+
+    return sheet_no, sheet_title, rev_no, rev_date, rev_desc, rev_by, other_attrs
 
 # =========================
 # Main
