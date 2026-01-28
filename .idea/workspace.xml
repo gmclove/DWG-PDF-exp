@@ -4,9 +4,19 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="36a79711-050f-40f3-9b39-31293afb1351" name="Changes" comment="sheet list output working">
+    <list default="true" id="36a79711-050f-40f3-9b39-31293afb1351" name="Changes" comment="restructure code, OOP approach, increases extensibility, app.py for .exec generation">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/__init__.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/app.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/cad/__init__.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/cad/plotter.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/config.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/io/__init__.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/io/files.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/pdf/__init__.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/pdf/merge.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/titleblock/__init__.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/titleblock/scanner.py" beforeDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -44,14 +54,16 @@
   <component name="PropertiesComponent"><![CDATA[{
   "keyToString": {
     "ModuleVcsDetector.initialDetectionPerformed": "true",
+    "Python.app.executor": "Run",
     "Python.main.executor": "Run",
+    "Python.run.executor": "Run",
     "RunOnceActivity.ShowReadmeOnStart": "true",
     "RunOnceActivity.git.unshallow": "true",
     "git-widget-placeholder": "dev",
     "junie.onboarding.icon.badge.shown": "true"
   }
 }]]></component>
-  <component name="RunManager">
+  <component name="RunManager" selected="Python.run">
     <configuration name="main" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
       <module name="DWG-PDF-exp" />
       <option name="ENV_FILES" value="" />
@@ -74,8 +86,31 @@
       <option name="INPUT_FILE" value="" />
       <method v="2" />
     </configuration>
+    <configuration name="run" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
+      <module name="DWG-PDF-exp" />
+      <option name="ENV_FILES" value="" />
+      <option name="INTERPRETER_OPTIONS" value="" />
+      <option name="PARENT_ENVS" value="true" />
+      <envs>
+        <env name="PYTHONUNBUFFERED" value="1" />
+      </envs>
+      <option name="SDK_HOME" value="" />
+      <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$" />
+      <option name="IS_MODULE_SDK" value="true" />
+      <option name="ADD_CONTENT_ROOTS" value="true" />
+      <option name="ADD_SOURCE_ROOTS" value="true" />
+      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/run.py" />
+      <option name="PARAMETERS" value="" />
+      <option name="SHOW_COMMAND_LINE" value="false" />
+      <option name="EMULATE_TERMINAL" value="false" />
+      <option name="MODULE_MODE" value="false" />
+      <option name="REDIRECT_INPUT" value="false" />
+      <option name="INPUT_FILE" value="" />
+      <method v="2" />
+    </configuration>
     <recent_temporary>
       <list>
+        <item itemvalue="Python.run" />
         <item itemvalue="Python.main" />
       </list>
     </recent_temporary>
@@ -151,7 +186,15 @@
       <option name="project" value="LOCAL" />
       <updated>1769609808234</updated>
     </task>
-    <option name="localTasksCounter" value="8" />
+    <task id="LOCAL-00008" summary="restructure code, OOP approach, increases extensibility, app.py for .exec generation">
+      <option name="closed" value="true" />
+      <created>1769637374189</created>
+      <option name="number" value="00008" />
+      <option name="presentableId" value="LOCAL-00008" />
+      <option name="project" value="LOCAL" />
+      <updated>1769637374189</updated>
+    </task>
+    <option name="localTasksCounter" value="9" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -171,6 +214,7 @@
     <MESSAGE value="day 2, fast title block reader but not working" />
     <MESSAGE value="runs with bad sheet list output" />
     <MESSAGE value="sheet list output working" />
-    <option name="LAST_COMMIT_MESSAGE" value="sheet list output working" />
+    <MESSAGE value="restructure code, OOP approach, increases extensibility, app.py for .exec generation" />
+    <option name="LAST_COMMIT_MESSAGE" value="restructure code, OOP approach, increases extensibility, app.py for .exec generation" />
   </component>
 </project>

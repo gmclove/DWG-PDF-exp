@@ -1,4 +1,3 @@
-
 import time
 from pathlib import Path
 from typing import List, Dict
@@ -7,9 +6,11 @@ import pythoncom
 import win32com.client
 
 from ..titleblock.scanner import read_titleblock_from_active_layout_robust
+from ..io.files import sanitize_filename
 
 # COM retry helpers
 RPC_E_CALL_REJECTED = -2147418111
+
 
 def com_retry_call(func, *args, retries=50, delay=0.15, desc="", **kwargs):
     last_exc = None
@@ -29,14 +30,17 @@ def com_retry_call(func, *args, retries=50, delay=0.15, desc="", **kwargs):
     if last_exc:
         raise last_exc
 
+
 def com_get(obj, attr, **kw):
     return com_retry_call(lambda: getattr(obj, attr), desc=f"get {attr}", **kw)
+
 
 def com_set(obj, attr, value, **kw):
     def setter():
         setattr(obj, attr, value)
         return True
     return com_retry_call(setter, desc=f"set {attr}", **kw)
+
 
 def com_call(obj, method, *args, **kw):
     def inv():
@@ -64,7 +68,9 @@ class AutoCADPdfConverter:
             com_set(self.acad, "Visible", self.visible)
             _ = com_get(self.acad, "Version")
         except Exception as e:
-            raise RuntimeError("AutoCAD COM interface not available. Ensure AutoCAD is installed and can launch without modal dialogs.") from e
+            raise RuntimeError(
+                "AutoCAD COM interface not available. Ensure AutoCAD is installed and can launch without modal dialogs."
+            ) from e
         return self
 
     def __exit__(self, exc_type, exc, tb):
@@ -180,8 +186,7 @@ class AutoCADPdfConverter:
                             error = f"Title block read: {e}"
 
                 # Plot
-                pdf_name = f"{dwg_path.stem}__{layout_name.replace('/', '_').replace('\', '_')} .pdf"
-                pdf_name = pdf_name.replace("  ", " ").strip()
+                pdf_name = f"{dwg_path.stem}__{sanitize_filename(layout_name)}.pdf"
                 pdf_path = out_dir / pdf_name
                 plot_success = "No"
 
