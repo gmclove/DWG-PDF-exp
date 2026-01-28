@@ -1,11 +1,10 @@
-
 import os
 import sys
 import time
 import shutil
 import re
+import csv
 from pathlib import Path
-import pandas as pd
 
 # ---------- Optional GUI for folder picking ----------
 try:
@@ -30,18 +29,23 @@ try:
 except Exception:
     PYPDF2_AVAILABLE = False
 
-# ---------- PDF text extraction / data ----------
-try:
-    import pdfplumber
-    PDFPLUMBER_AVAILABLE = True
-except Exception:
-    PDFPLUMBER_AVAILABLE = False
 
-try:
-    import pandas as pd
-    PANDAS_AVAILABLE = True
-except Exception:
-    PANDAS_AVAILABLE = False
+# =========================
+# Configuration (fast path for your title block name)
+# =========================
+# If you know the exact sheet-specific title block name(s), add them here (UPPERCASE).
+# This makes the scanner extremely fast because it skips all other blocks immediately.
+TARGET_BLOCK_NAMES = {
+    # Example from your screenshot (update to your actual block name(s)):
+    # "GF MALTA TITLE BLOCK 30X42-TB-ATT",
+}
+
+# Joiners (formatting)
+SHEETNO_SEPARATOR = "-"             # e.g., "FA-JD-8BIRW002"
+TITLE_JOINER = " "                  # e.g., "FAB - I&C BIRW (IRW) TANK DEMO P&ID 2 OF 2"
+
+# Revision index range to scan (R0..R9 => 0..9). Increase if you use more than R9.
+REV_INDEX_RANGE = range(0, 10)
 
 
 # =========================
@@ -65,13 +69,12 @@ def ensure_dir(path: Path):
     path.mkdir(parents=True, exist_ok=True)
 
 
-def list_dwg_files(input_dir: Path, recursive: bool = True) -> list[Path]:
+def list_dwg_files(input_dir: Path, recursive: bool = True) -> list:
     pattern = "**/*.dwg" if recursive else "*.dwg"
-    # Skip temp/hidden files that often cause issues
     return [p for p in input_dir.glob(pattern) if p.is_file() and not p.name.startswith("~")]
 
 
-def copy_dwg_files(dwg_files: list[Path], dest_dir: Path) -> list[Path]:
+def copy_dwg_files(dwg_files: list, dest_dir: Path) -> list:
     ensure_dir(dest_dir)
     copied = []
     for src in dwg_files:
@@ -138,158 +141,10 @@ def com_call(obj, method, *args, **kw):
 
 
 # =========================
-# AutoCAD PDF Converter
+# PDF Merge
 # =========================
 
-class AutoCADPdfConverter:
-    """DWG -> individual layout PDFs using AutoCAD COM."""
-
-    def __init__(self, pdf_pc3_name="DWG To PDF.pc3", visible=False):
-        if not WIN32_AVAILABLE:
-            raise RuntimeError("pywin32 not available. Install with: pip install pywin32")
-        self.pdf_pc3_name = pdf_pc3_name
-        self.visible = visible
-        self.acad = None
-
-    def __enter__(self):
-        # Initialize COM in STA (Apartment threaded) – more reliable for AutoCAD
-        try:
-            pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
-        except Exception:
-            pythoncom.CoInitialize()
-        # Start AutoCAD
-        try:
-            try:
-                self.acad = win32com.client.gencache.EnsureDispatch("AutoCAD.Application")
-            except Exception:
-                self.acad = win32com.client.Dispatch("AutoCAD.Application")
-            com_set(self.acad, "Visible", self.visible)
-            # Probe readiness
-            _ = com_get(self.acad, "Version")
-        except Exception as e:
-            raise RuntimeError("AutoCAD COM interface not available. Ensure AutoCAD is installed and can launch without modal dialogs.") from e
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        try:
-            pythoncom.CoUninitialize()
-        except Exception:
-            pass
-
-    def open_document(self, dwg_path: Path):
-        docs = com_get(self.acad, "Documents")
-        # Use single-argument Open for compatibility
-        doc = com_call(docs, "Open", str(dwg_path))
-        # Wait until document is ready by probing FullName
-        for _ in range(100):
-            try:
-                _ = com_get(doc, "FullName")
-                break
-            except Exception:
-                pythoncom.PumpWaitingMessages()
-                time.sleep(0.1)
-        return doc
-
-    def close_document(self, doc, save=False):
-        try:
-            com_call(doc, "Close", bool(save))
-        except Exception:
-            pass
-
-    def convert_individual(self, dwg_path: Path, out_dir: Path):
-        """Create one PDF per Paper Space layout for this DWG. Returns list of PDF paths."""
-        generated = []
-        doc = None
-        try:
-            doc = self.open_document(dwg_path)
-        except Exception as e:
-            print(f"    ! Failed to open {dwg_path.name}: {e}")
-            return generated
-
-        try:
-            layouts = com_get(doc, "Layouts")
-            count = com_get(layouts, "Count")
-            for i in range(count):
-                layout = com_call(layouts, "Item", i)
-                name = com_get(layout, "Name")
-                if name.lower() == "model":
-                    continue
-
-                # Refresh and set plot device
-                try:
-                    try:
-                        com_call(layout, "RefreshPlotDeviceInfo")
-                    except Exception:
-                        pass
-                    com_set(layout, "ConfigName", self.pdf_pc3_name)
-                except Exception:
-                    print(f"    ! Plotter '{self.pdf_pc3_name}' unavailable for layout '{name}'")
-                    continue
-
-                # Activate this layout
-                try:
-                    com_set(doc, "ActiveLayout", layout)
-                except Exception:
-                    pythoncom.PumpWaitingMessages()
-                    time.sleep(0.2)
-                    try:
-                        com_set(doc, "ActiveLayout", layout)
-                    except Exception:
-                        print(f"    ! Could not activate layout '{name}'")
-                        continue
-
-                # Read TB (fast path with your known block name(s); fallback works too if you pass None)
-                sheet_no, sheet_title, rev_no, rev_date, rev_desc, rev_by, other_attrs = read_titleblock_from_active_layout_robust(
-                    doc,
-                    target_block_names=TARGET_BLOCKS,  # or None to use scoring-only
-                    sheet_top_tags=("FC-E",),  # include any alternates here if needed
-                    sheet_bottom_tags=("442C",),
-                    title_tag_primary=("TITLE_1", "TITLE_2", "TITLE_3", "TITLE_4", "TITLE_5"),
-                    title_tag_aliases=("ELECTRICAL",),  # alias for TITLE_1 seen in your sample
-                    revision_index_range=range(0, 10),  # supports R0..R9 if needed
-                    sheetno_sep="-",
-                    title_joiner=" "
-                )
-
-
-
-
-                pdf_name = f"{dwg_path.stem}__{sanitize_filename(name)}.pdf"
-                pdf_path = out_dir / pdf_name
-
-                # Plot
-                try:
-                    plot = com_get(doc, "Plot")
-                    com_call(plot, "PlotToFile", str(pdf_path))
-                    # Wait for file to finish writing
-                    t0 = time.time()
-                    while time.time() - t0 < 30:
-                        if pdf_path.exists() and pdf_path.stat().st_size > 0:
-                            break
-                        pythoncom.PumpWaitingMessages()
-                        time.sleep(0.2)
-                    if pdf_path.exists() and pdf_path.stat().st_size > 0:
-                        print(f"    ✓ {pdf_path.name}")
-                        generated.append(pdf_path)
-                    else:
-                        print(f"    ! Plot finished but no file for layout '{name}'")
-                except Exception as e:
-                    print(f"    ! Failed to plot layout '{name}': {e}")
-
-
-
-        finally:
-            if doc is not None:
-                self.close_document(doc, save=False)
-
-        return generated
-
-
-# =========================
-# Merge PDFs
-# =========================
-
-def merge_pdfs_in_order(pdf_paths: list[Path], output_path: Path):
+def merge_pdfs_in_order(pdf_paths: list, output_path: Path):
     if not PYPDF2_AVAILABLE:
         raise RuntimeError("PyPDF2 not available. Install with: pip install PyPDF2")
     if not pdf_paths:
@@ -310,188 +165,66 @@ def merge_pdfs_in_order(pdf_paths: list[Path], output_path: Path):
 
 
 # =========================
-# Sheet List Extraction
+# Title Block Scanning (fast + robust)
 # =========================
-
-SHEET_KEYWORDS = (
-    "PLAN", "ELEVATION", "SECTION", "DETAIL", "SCHEDULE",
-    "P&ID", "PROCESS", "DEMO", "FAB", "TITLE", "GENERAL", "NOTES"
-)
-
-def extract_sheet_info(pdf_path: Path, crop_frac: float = 0.22) -> pd.DataFrame:
-    """
-    Extract Sheet Number, Sheet Name, Revision from the combined PDF.
-    - Crops bottom-right area (title block) where possible.
-    - Uses heuristics & regex to find values.
-    Returns a pandas DataFrame with columns: Page, Sheet Number, Sheet Name, Revision.
-    """
-    if not PDFPLUMBER_AVAILABLE:
-        raise RuntimeError("pdfplumber not available. Install with: pip install pdfplumber")
-    if not PANDAS_AVAILABLE:
-        raise RuntimeError("pandas not available. Install with: pip install pandas")
-
-    results = []
-
-    with pdfplumber.open(str(pdf_path)) as pdf:
-        for i, page in enumerate(pdf.pages, start=1):
-            width, height = page.width, page.height
-            crop_box = (width * (1 - crop_frac), height * (1 - crop_frac), width, height)
-
-            # Try cropped title block area; fallback to full page text
-            try:
-                cropped_page = page.crop(crop_box)
-                text = cropped_page.extract_text() or ""
-                if not text.strip():
-                    text = page.extract_text() or ""
-            except Exception:
-                text = page.extract_text() or ""
-
-            # Normalize and split lines
-            lines = [ln.strip() for ln in (text.split("\n") if text else []) if ln.strip()]
-
-            # Defaults
-            sheet_no = "Not Found"
-            sheet_name = "Not Found"
-            revision = "Not Found"
-
-            # --- Heuristic A: labeled fields (more robust if present) ---
-            labeled_patterns = [
-                r'(?:SHEET\s*(?:NO|NUMBER)|DWG\s*(?:NO|NUMBER)|DRAWING\s*(?:NO|NUMBER))[:\s]*([A-Z0-9.\-]+)',
-                r'(?:REV(?:ISION)?)[:\s\-]*([A-Z0-9.\-]+)',
-            ]
-            block_text = " ".join(lines)
-
-            # Revision first
-            rev_match = re.search(r'\bREV(?:ISION)?[:\s\-]*([A-Z0-9.\-]+)\b', block_text, flags=re.IGNORECASE)
-            if rev_match:
-                revision = rev_match.group(1).upper()
-
-            # Sheet number via labeled field
-            no_match = re.search(r'(?:SHEET\s*(?:NO|NUMBER)|DWG\s*(?:NO|NUMBER)|DRAWING\s*(?:NO|NUMBER))[:\s]*([A-Z0-9.\-]+)', block_text, flags=re.IGNORECASE)
-            if no_match:
-                sheet_no = no_match.group(1).upper()
-
-            # --- Heuristic B: pattern-based (handles FA-DD 205 etc.) ---
-            if sheet_no == "Not Found":
-                patterns = [
-                    r'\bFA-[A-Z]+(?:\s*[A-Z0-9.\-]+)?\b',     # FA-DD 205, FA-J 8BIRW001
-                    r'\b[A-Z]{1,3}\s*-\s*[A-Z0-9.\-]+\b',     # A-101, M-2.1
-                    r'\b[A-Z]{1,3}\s*[0-9][A-Z0-9.\-]*\b',    # A101, M2.1
-                ]
-                for line in reversed(lines):  # Often at bottom-most lines
-                    for pat in patterns:
-                        m = re.search(pat, line)
-                        if m:
-                            sheet_no = m.group(0).replace(" ", "").upper()
-                            break
-                    if sheet_no != "Not Found":
-                        break
-
-            # --- Heuristic C: Sheet name candidates (uppercase title near title block) ---
-            # Prefer lines containing keywords; otherwise pick the longest ALL-CAPS near bottom.
-            candidates = []
-            for ln in lines:
-                ln_clean = ln.strip()
-                # Skip obvious metadata
-                if any(k in ln_clean.upper() for k in ("CONFIDENTIAL", "PROJECT", "CLIENT", "DRAWN", "CHECKED", "APPROVED", "SCALE")):
-                    continue
-                # Capture keyword lines
-                if any(k in ln_clean.upper() for k in SHEET_KEYWORDS):
-                    candidates.append(ln_clean)
-                else:
-                    # Heuristic: all caps / mostly caps
-                    letters = re.sub(r'[^A-Za-z]', '', ln_clean)
-                    if letters and (sum(1 for c in letters if c.isupper()) / max(1, len(letters))) > 0.6 and len(ln_clean) >= 6:
-                        candidates.append(ln_clean)
-
-            if candidates:
-                # Prefer the last candidate in the cropped area (closer to title block bottom)
-                sheet_name = candidates[-1].upper()
-
-            results.append({
-                "Page": i,
-                "Sheet Number": sheet_no,
-                "Sheet Name": sheet_name,
-                "Revision": revision
-            })
-
-    return pd.DataFrame(results)
-
-
-def save_sheet_list(df: pd.DataFrame, output_dir: Path, project_name: str):
-    """Save the sheet list as CSV (always) and Excel if openpyxl is available."""
-    ensure_dir(output_dir)
-    csv_path = output_dir / f"{sanitize_filename(project_name)}_Sheet List.csv"
-    df.to_csv(csv_path, index=False)
-    print(f"✓ Sheet List (CSV) saved: {csv_path.name}")
-
-    # Excel optional
-    try:
-        # pandas will use openpyxl for .xlsx
-        xlsx_path = output_dir / f"{sanitize_filename(project_name)}_Sheet List.xlsx"
-        df.to_excel(xlsx_path, index=False, engine="openpyxl")
-        print(f"✓ Sheet List (Excel) saved: {xlsx_path.name}")
-    except Exception:
-        print("    ! Excel export skipped (openpyxl not installed or write error).")
-
-
-def normalize_tag(tag: str) -> str:
-    """
-    Normalize attribute tag names (e.g., 'FC-E' -> 'FCE').
-    Removes all non-alphanumeric chars and uppercases.
-    """
-    return re.sub(r'[^A-Z0-9]', '', (tag or "").strip().upper())
 
 def _norm_tag(s: str) -> str:
     """Normalize attribute tag names for matching (upper + strip non-alnum)."""
     return re.sub(r'[^A-Z0-9]', '', (s or '').upper())
 
+def _norm_prompt(s: str) -> str:
+    """Normalize attribute prompts similarly."""
+    return re.sub(r'[^A-Z0-9]', '', (s or '').upper())
+
 def _norm_name(s: str) -> str:
-    """Normalize block names (upper, trimmed)."""
+    """Normalize block name (upper + trim)."""
     return (s or '').upper().strip()
+
 
 def read_titleblock_from_active_layout_robust(
     doc,
     *,
-    # 1) FAST PATH: If you know the exact block name(s) for the sheet title block, put them here (UPPERCASE).
-    # You can include multiple names if you have several templates.
-    target_block_names: set[str] | None = None,
-    # 2) SHEET NUMBER: known tags (by TAG name, not prompt)
+    # Fast path: match by block name(s)
+    target_block_names=None,
+    # Sheet number: tags & prompts (we match both)
     sheet_top_tags=("FC-E", "TOPNUMBER", "TOP_NUM", "TOP"),
+    sheet_top_prompts=("TOP NUMBER",),
     sheet_bottom_tags=("442C", "BOTTOMNUMBER", "BOTTOM_NUM", "BOTTOM"),
-    # 3) SHEET TITLE: accept TITLE_1..TITLE_5 (primary), and fallback aliases
+    sheet_bottom_prompts=("BOTTOM NUMBER",),
+    # Title lines: prompts TITLE_1..TITLE_5 + a common alias you showed ("ELECTRICAL")
     title_tag_primary=("TITLE_1", "TITLE_2", "TITLE_3", "TITLE_4", "TITLE_5"),
-    title_tag_aliases=("ELECTRICAL",),  # alias for TITLE_1 seen in your example
-    # 4) REVISION fields: R#NO, R#DATE, R#DESC, R#BY (we will scan 0..9 by default)
-    revision_index_range=range(0, 10),
-    # 5) Formatting
-    sheetno_sep="-",
-    title_joiner=" ",
-) -> tuple[str, str, str, str, str, str, dict]:
+    title_prompt_primary=("TITLE_1", "TITLE_2", "TITLE_3", "TITLE_4", "TITLE_5"),
+    title_prompts_alias=("ELECTRICAL",),
+    # Revisions: R#NO, R#DATE, R#DESC, R#BY for indices in REV_INDEX_RANGE
+    revision_index_range=REV_INDEX_RANGE,
+    # Formatting
+    sheetno_sep=SHEETNO_SEPARATOR,
+    title_joiner=TITLE_JOINER,
+):
     """
     Read the sheet-specific title block attributes on the ACTIVE layout (PaperSpace).
 
-    Returns **exactly** 7 values:
+    Returns **7 values always**:
         (sheet_no, sheet_title, rev_no, rev_date, rev_desc, rev_by, other_attrs_dict)
 
-    - Uses fast block-name filtering if target_block_names is provided.
-    - Otherwise uses scoring against known sheet tags & revision patterns.
-    - Skips XREF blocks.
-    - 'other_attrs_dict' includes all attributes from the chosen sheet block
-      EXCLUDING the ones used for sheet number, title lines, and revision.
-
-    IMPORTANT: Call this only AFTER activating the layout:
-        com_set(doc, "ActiveLayout", layout)
+    Logic:
+    - If target_block_names provided, filter PaperSpace blocks by name (fast).
+    - Else, scan & score blocks against known tags/prompts (robust).
+    - Skip XREF blocks where detectable.
+    - Match both by TagString and PromptString for sheet/ title fields.
     """
+    # Normalize config
+    tb_names = {_norm_name(n) for n in (target_block_names or [])} if target_block_names else None
 
-    # Normalize configuration
-    sheet_top_norm = {_norm_tag(t) for t in sheet_top_tags}
-    sheet_bot_norm = {_norm_tag(t) for t in sheet_bottom_tags}
+    sheet_top_tag_norm = {_norm_tag(t) for t in sheet_top_tags}
+    sheet_top_prompt_norm = {_norm_prompt(p) for p in sheet_top_prompts}
 
-    title_primary_norm = [_norm_tag(t) for t in title_tag_primary]  # ordered
-    title_alias_norm = {_norm_tag(t) for t in title_tag_aliases}
+    sheet_bot_tag_norm = {_norm_tag(t) for t in sheet_bottom_tags}
+    sheet_bot_prompt_norm = {_norm_prompt(p) for p in sheet_bottom_prompts}
 
-    target_block_names_norm = {_norm_name(n) for n in (target_block_names or set())} if target_block_names else None
+    title_tag_norm_order = [_norm_tag(t) for t in title_tag_primary]          # ordered by TITLE_1..TITLE_5
+    title_prompt_norm_order = [_norm_prompt(p) for p in title_prompt_primary] # same positions
+    title_prompt_alias_norm = {_norm_prompt(p) for p in title_prompts_alias}  # alias to TITLE_1
 
     # Outputs
     sheet_no = "Not Found"
@@ -500,7 +233,7 @@ def read_titleblock_from_active_layout_robust(
     rev_date = "Not Found"
     rev_desc = "Not Found"
     rev_by = "Not Found"
-    other_attrs: dict[str, str] = {}
+    other_attrs = {}
 
     # Access PaperSpace
     try:
@@ -509,20 +242,11 @@ def read_titleblock_from_active_layout_robust(
     except Exception:
         return sheet_no, sheet_title, rev_no, rev_date, rev_desc, rev_by, other_attrs
 
-    # Collector for best candidate block (scoring fallback)
-    best = {
-        "score": -1,
-        "attrs_raw": [],           # list of (raw_tag, norm_tag, value)
-        "top": "",
-        "bot": "",
-        "titles": {t: "" for t in title_primary_norm},  # TITLE1..TITLE5 norm keys
-        "revs": {},               # idx -> {"NO":..., "DATE":..., "DESC":..., "BY":...}
-        "attrs_count": 0,
-        "blkname": "",
-    }
-
     def collect_attrs(ent):
-        """Return [(raw_tag, norm_tag, value_str)] for an entity with attributes."""
+        """
+        Return list of dicts:
+          {"raw_tag","norm_tag","raw_prompt","norm_prompt","value"}
+        """
         out = []
         try:
             if not com_get(ent, "HasAttributes"):
@@ -533,124 +257,160 @@ def read_titleblock_from_active_layout_robust(
         for a in arr:
             try:
                 raw_tag = com_get(a, "TagString") or ""
-                norm_tag = _norm_tag(raw_tag)
-                val = (com_get(a, "TextString") or "").strip()
-                out.append((raw_tag, norm_tag, val))
             except Exception:
-                continue
+                raw_tag = ""
+            try:
+                raw_prompt = com_get(a, "PromptString") or ""
+            except Exception:
+                raw_prompt = ""  # Not always available; safe to blank
+            norm_tag = _norm_tag(raw_tag)
+            norm_prompt = _norm_prompt(raw_prompt)
+            try:
+                val = (com_get(a, "TextString") or "").strip()
+            except Exception:
+                val = ""
+            out.append({
+                "raw_tag": raw_tag, "norm_tag": norm_tag,
+                "raw_prompt": raw_prompt, "norm_prompt": norm_prompt,
+                "value": val
+            })
         return out
 
-    def analyze_block(attrs_raw):
+    def analyze_block(attrs):
         """
-        Compute score and extract sheet parts, titles, revisions.
+        Score a block & extract fields:
+          - Sheet number top/bottom (by tag OR prompt)
+          - Title lines (TITLE_1..TITLE_5 by tag OR prompt + alias into TITLE_1)
+          - Revisions R#NO/DATE/DESC/BY
         """
         score = 0
         top, bot = "", ""
-        titles = {t: "" for t in title_primary_norm}
-        revs = {}  # idx -> dict
+        # titles stored by TITLE_1..TITLE_5 normalized tag keys
+        titles = {t: "" for t in title_tag_norm_order}
+        revs = {}  # idx -> {"NO","DATE","DESC","BY"}
 
-        # Map raw tags for potential title alias mapping
-        # e.g., ELECTRICAL -> TITLE_1
-        for raw_tag, norm_tag, val in attrs_raw:
+        # First pass: detect sheet number and titles by tag/prompt
+        for attr in attrs:
+            val = attr["value"]
             if not val:
                 continue
+            nt = attr["norm_tag"]
+            np = attr["norm_prompt"]
 
-            # Sheet number parts
-            if norm_tag in sheet_top_norm and not top:
+            # Sheet top
+            if (nt in sheet_top_tag_norm or np in sheet_top_prompt_norm) and not top:
                 top = val; score += 3
-            elif norm_tag in sheet_bot_norm and not bot:
+                continue
+            # Sheet bottom
+            if (nt in sheet_bot_tag_norm or np in sheet_bot_prompt_norm) and not bot:
                 bot = val; score += 3
-
-            # Title lines - primary tags first
-            if norm_tag in titles and not titles[norm_tag]:
-                titles[norm_tag] = val; score += 1
                 continue
 
-        # Second pass for title aliases
-        for raw_tag, norm_tag, val in attrs_raw:
+            # Titles: tag match in correct order
+            if nt in titles and not titles[nt]:
+                titles[nt] = val; score += 1
+                continue
+
+            # Titles: prompt match (TITLE_1..TITLE_5)
+            if np in title_prompt_norm_order:
+                idx = title_prompt_norm_order.index(np)
+                t_norm = title_tag_norm_order[idx]
+                if not titles[t_norm]:
+                    titles[t_norm] = val; score += 1
+                continue
+
+        # Alias to TITLE_1 (e.g., ELECTRICAL)
+        t1 = title_tag_norm_order[0] if title_tag_norm_order else None
+        if t1 and not titles[t1]:
+            for attr in attrs:
+                if not attr["value"]:
+                    continue
+                if attr["norm_prompt"] in title_prompt_alias_norm or attr["norm_tag"] in {_norm_tag("ELECTRICAL")}:
+                    titles[t1] = attr["value"]; score += 1
+                    break
+
+        # Revisions R#NO/DATE/DESC/BY (by tag only — prompts are less consistent)
+        for attr in attrs:
+            val = attr["value"]
             if not val:
                 continue
-            if norm_tag in title_alias_norm:
-                # Map alias to TITLE_1 (first position) if still empty
-                t1 = title_primary_norm[0] if title_primary_norm else None
-                if t1 and not titles[t1]:
-                    titles[t1] = val
-                    score += 1
-
-        # Revisions
-        for raw_tag, norm_tag, val in attrs_raw:
-            if not val:
-                continue
-            # Match R#NO / R#DATE / R#DESC / R#BY
-            m = re.match(r'^R(\d+)(NO|DATE|DESC|BY)$', norm_tag)
+            m = re.match(r'^R(\d+)(NO|DATE|DESC|BY)$', attr["norm_tag"])
             if m:
                 idx = int(m.group(1))
-                kind = m.group(2)
                 if idx in revision_index_range:
+                    kind = m.group(2)
                     if idx not in revs:
                         revs[idx] = {"NO": "", "DATE": "", "DESC": "", "BY": ""}
                     revs[idx][kind] = val
-                    # Each present field adds a small score
                     score += 1
 
         return score, top, bot, titles, revs
 
+    best = {
+        "score": -1,
+        "attrs": [],
+        "top": "",
+        "bot": "",
+        "titles": {t: "" for t in title_tag_norm_order},
+        "revs": {},
+        "attrs_count": 0,
+        "blkname": "",
+    }
+
     def consider_entity(ent):
-        """
-        Check entity by name filter, XREF, then score attributes.
-        Update global 'best' if this block is a better match.
-        """
         nonlocal best
-        # Name filter (fast path)
+        # Filter by block name if provided
         try:
             blkname = com_get(ent, "Name") or ""
         except Exception:
             blkname = ""
         blkname_norm = _norm_name(blkname)
 
-        # XREF skip (project-wide TB)
+        # Skip XREF blocks if detectable
         try:
             if com_get(ent, "IsXRef"):
                 return
         except Exception:
             pass
 
-        # If specific block names were provided, enforce them
-        if target_block_names_norm is not None:
-            if blkname_norm not in target_block_names_norm:
-                return
+        if TARGET_BLOCK_NAMES:
+            # Use configured globals unless overridden by param
+            tb_names_local = tb_names if tb_names is not None else {_norm_name(n) for n in TARGET_BLOCK_NAMES}
+        else:
+            tb_names_local = tb_names
 
-        # Must have attributes
-        attrs_raw = collect_attrs(ent)
-        if not attrs_raw:
+        if tb_names_local is not None:
+            if blkname_norm not in tb_names_local:
+                return  # not our sheet-specific block name
+
+        attrs = collect_attrs(ent)
+        if not attrs:
             return
 
-        score, top, bot, titles, revs = analyze_block(attrs_raw)
-
-        # Prefer higher score; tie-breaker by number of attributes (bigger block)
-        if (score > best["score"]) or (score == best["score"] and len(attrs_raw) > best["attrs_count"]):
+        score, top, bot, titles, revs = analyze_block(attrs)
+        if (score > best["score"]) or (score == best["score"] and len(attrs) > best["attrs_count"]):
             best = {
                 "score": score,
-                "attrs_raw": attrs_raw,
+                "attrs": attrs,
                 "top": top,
                 "bot": bot,
                 "titles": titles,
                 "revs": revs,
-                "attrs_count": len(attrs_raw),
+                "attrs_count": len(attrs),
                 "blkname": blkname,
             }
 
-    # Iterate PaperSpace entities (once)
+    # Iterate PaperSpace once (fast path if block names are known)
     for i in range(ps_count):
         try:
             ent = com_call(ps, "Item", i)
         except Exception:
             continue
         consider_entity(ent)
-        # Optimization: if fast path and we already matched one, we could break
-        # but keep scanning in case there are multiple inserts—use the best score.
+        # If block names are enforced and we already found a high-score block,
+        # you could break early. We keep scanning in case multiple instances exist.
 
-    # No candidate found → return defaults
+    # No candidate found
     if best["score"] < 0:
         return sheet_no, sheet_title, rev_no, rev_date, rev_desc, rev_by, other_attrs
 
@@ -662,9 +422,10 @@ def read_titleblock_from_active_layout_robust(
     elif best["bot"]:
         sheet_no = best["bot"]
 
-    # Build sheet title (TITLE_1..TITLE_5 in order)
-    title_values = [best["titles"][t] for t in title_primary_norm if best["titles"][t]]
-    sheet_title = title_joiner.join(title_values) if title_values else sheet_title
+    # Build title (TITLE_1..TITLE_5)
+    title_vals = [best["titles"][t] for t in title_tag_norm_order if best["titles"][t]]
+    if title_vals:
+        sheet_title = title_joiner.join(title_vals)
 
     # Pick highest revision index that has NO
     if best["revs"]:
@@ -676,35 +437,319 @@ def read_titleblock_from_active_layout_robust(
             rev_desc = d.get("DESC") or rev_desc
             rev_by = d.get("BY") or rev_by
 
-    # Build 'other_attrs' = all attributes not used for sheet number, title, revision
+    # Build other_attrs: include everything else from chosen block
+    # Exclude used tags/prompts (by normalized forms)
     used_norm_tags = set()
-    used_norm_tags |= sheet_top_norm
-    used_norm_tags |= sheet_bot_norm
-    used_norm_tags |= set(title_primary_norm) | set(title_alias_norm)
-    # Add revision tag patterns R#NO/DATE/DESC/BY explicitly
+    used_norm_prompts = set()
+
+    used_norm_tags |= sheet_top_tag_norm
+    used_norm_prompts |= sheet_top_prompt_norm
+    used_norm_tags |= sheet_bot_tag_norm
+    used_norm_prompts |= sheet_bot_prompt_norm
+
+    used_norm_tags |= set(title_tag_norm_order)
+    used_norm_prompts |= set(title_prompt_norm_order)
+    used_norm_prompts |= set(title_prompt_alias_norm)
+
     for idx in revision_index_range:
         for kind in ("NO", "DATE", "DESC", "BY"):
             used_norm_tags.add(_norm_tag(f"R{idx}{kind}"))
 
-    # other_attrs uses RAW TAG NAMES as column headers
-    for raw_tag, norm_tag, val in best["attrs_raw"]:
-        if not val:
+    # Collect remaining attributes using *raw tag name* as the column header
+    for a in best["attrs"]:
+        if not a["value"]:
             continue
-        if norm_tag in used_norm_tags:
+        if a["norm_tag"] in used_norm_tags or a["norm_prompt"] in used_norm_prompts:
             continue
-        # Keep the first occurrence of each raw tag
-        if raw_tag not in other_attrs:
-            other_attrs[raw_tag] = val
+        # Keep first occurrence
+        if a["raw_tag"] and a["raw_tag"] not in other_attrs:
+            other_attrs[a["raw_tag"]] = a["value"]
+        elif not a["raw_tag"]:
+            # If raw tag is empty (rare), fallback to prompt as key
+            key = a["raw_prompt"] or "ATTR"
+            if key not in other_attrs:
+                other_attrs[key] = a["value"]
 
     return sheet_no, sheet_title, rev_no, rev_date, rev_desc, rev_by, other_attrs
+
+
+# =========================
+# AutoCAD PDF Converter + Drawing List
+# =========================
+
+class AutoCADPdfConverter:
+    """DWG -> individual layout PDFs + per-layout Drawing List rows."""
+
+    def __init__(self, pdf_pc3_name="DWG To PDF.pc3", visible=False):
+        if not WIN32_AVAILABLE:
+            raise RuntimeError("pywin32 not available. Install with: pip install pywin32")
+        self.pdf_pc3_name = pdf_pc3_name
+        self.visible = visible
+        self.acad = None
+
+    def __enter__(self):
+        try:
+            pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
+        except Exception:
+            pythoncom.CoInitialize()
+        try:
+            try:
+                self.acad = win32com.client.gencache.EnsureDispatch("AutoCAD.Application")
+            except Exception:
+                self.acad = win32com.client.Dispatch("AutoCAD.Application")
+            com_set(self.acad, "Visible", self.visible)
+            _ = com_get(self.acad, "Version")
+        except Exception as e:
+            raise RuntimeError("AutoCAD COM interface not available. Ensure AutoCAD is installed and can launch without modal dialogs.") from e
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass
+
+    def open_document(self, dwg_path: Path):
+        docs = com_get(self.acad, "Documents")
+        doc = com_call(docs, "Open", str(dwg_path))  # single-arg Open for compatibility
+        # Probe readiness
+        for _ in range(100):
+            try:
+                _ = com_get(doc, "FullName")
+                break
+            except Exception:
+                pythoncom.PumpWaitingMessages()
+                time.sleep(0.1)
+        return doc
+
+    def close_document(self, doc, save=False):
+        try:
+            com_call(doc, "Close", bool(save))
+        except Exception:
+            pass
+
+    def convert_individual_and_collect_rows(self, dwg_path: Path, out_dir: Path, rows: list):
+        """
+        - EXACT plotting behavior as your working version
+        - Always writes one row per Paper layout (even if plot fails)
+        - Adds Sheet/Title/Revision fields and the remaining attributes as extra columns
+        """
+        generated = []
+        doc = None
+        try:
+            doc = self.open_document(dwg_path)
+        except Exception as e:
+            rows.append({
+                "DWG File": dwg_path.name,
+                "Layout": "",
+                "Sheet Number": "Not Found",
+                "Sheet Name": "Not Found",
+                "Revision Number": "Not Found",
+                "Revision Date": "Not Found",
+                "Revision Description": "Not Found",
+                "Revision By": "Not Found",
+                "Plot Successful": "No",
+                "Status": "Open Failed",
+                "Error": str(e),
+                "Individual PDF": ""
+            })
+            print(f"    ! Failed to open {dwg_path.name}: {e}")
+            return generated
+
+        try:
+            layouts = com_get(doc, "Layouts")
+            count = com_get(layouts, "Count")
+            found_paper = False
+
+            for i in range(count):
+                layout = com_call(layouts, "Item", i)
+                name = com_get(layout, "Name")
+                layout_name = str(name)
+                if layout_name.lower() == "model":
+                    continue
+                found_paper = True
+
+                # Refresh & set plot device
+                plotter_ok = True
+                status = ""
+                error = ""
+                try:
+                    try:
+                        com_call(layout, "RefreshPlotDeviceInfo")
+                    except Exception:
+                        pass
+                    com_set(layout, "ConfigName", self.pdf_pc3_name)
+                except Exception as e:
+                    plotter_ok = False
+                    status = "Plotter Unavailable"
+                    error = str(e)
+
+                # Activate layout
+                activated = False
+                if plotter_ok:
+                    try:
+                        com_set(doc, "ActiveLayout", layout)
+                        activated = True
+                    except Exception:
+                        pythoncom.PumpWaitingMessages()
+                        time.sleep(0.2)
+                        try:
+                            com_set(doc, "ActiveLayout", layout)
+                            activated = True
+                        except Exception as e2:
+                            status = "Activate Failed"
+                            error = str(e2)
+
+                # Read title block attributes (fast + robust)
+                sheet_no = "Not Found"
+                sheet_title = "Not Found"
+                rev_no = "Not Found"
+                rev_date = "Not Found"
+                rev_desc = "Not Found"
+                rev_by = "Not Found"
+                other_attrs = {}
+
+                if activated:
+                    try:
+                        sheet_no, sheet_title, rev_no, rev_date, rev_desc, rev_by, other_attrs = read_titleblock_from_active_layout_robust(
+                            doc,
+                            target_block_names=TARGET_BLOCK_NAMES or None,
+                            sheet_top_tags=("FC-E", "TOPNUMBER", "TOP_NUM", "TOP"),
+                            sheet_top_prompts=("TOP NUMBER",),
+                            sheet_bottom_tags=("442C", "BOTTOMNUMBER", "BOTTOM_NUM", "BOTTOM"),
+                            sheet_bottom_prompts=("BOTTOM NUMBER",),
+                            title_tag_primary=("TITLE_1", "TITLE_2", "TITLE_3", "TITLE_4", "TITLE_5"),
+                            title_prompt_primary=("TITLE_1", "TITLE_2", "TITLE_3", "TITLE_4", "TITLE_5"),
+                            title_prompts_alias=("ELECTRICAL",),
+                            revision_index_range=REV_INDEX_RANGE,
+                            sheetno_sep=SHEETNO_SEPARATOR,
+                            title_joiner=TITLE_JOINER,
+                        )
+                    except Exception as e:
+                        if error:
+                            error += f" | Title block read: {e}"
+                        else:
+                            error = f"Title block read: {e}"
+
+                # Prepare PDF path
+                pdf_name = f"{dwg_path.stem}__{sanitize_filename(layout_name)}.pdf"
+                pdf_path = out_dir / pdf_name
+                plot_success = "No"
+
+                # Plot if possible
+                if plotter_ok and activated:
+                    try:
+                        plot = com_get(doc, "Plot")
+                        com_call(plot, "PlotToFile", str(pdf_path))
+                        # Wait for file to finish writing
+                        t0 = time.time()
+                        while time.time() - t0 < 30:
+                            if pdf_path.exists() and pdf_path.stat().st_size > 0:
+                                break
+                            pythoncom.PumpWaitingMessages()
+                            time.sleep(0.2)
+                        if pdf_path.exists() and pdf_path.stat().st_size > 0:
+                            print(f"    ✓ {pdf_path.name}")
+                            generated.append(pdf_path)
+                            plot_success = "Yes"
+                            status = "Plotted"
+                        else:
+                            status = "Plot Failed"
+                            if not error:
+                                error = "Plot finished but no file for layout."
+                    except Exception as e:
+                        status = "Plot Failed"
+                        error = (error + " | " if error else "") + str(e)
+                else:
+                    if not status:
+                        status = "Skipped"
+
+                # Build per-layout row (base fields)
+                row = {
+                    "DWG File": dwg_path.name,
+                    "Layout": layout_name,
+                    "Sheet Number": sheet_no,
+                    "Sheet Name": sheet_title,
+                    "Revision Number": rev_no,
+                    "Revision Date": rev_date,
+                    "Revision Description": rev_desc,
+                    "Revision By": rev_by,
+                    "Plot Successful": plot_success,
+                    "Status": status or "",
+                    "Error": error or "",
+                    "Individual PDF": str(pdf_path) if (plot_success == "Yes") else ""
+                }
+
+                # Add remaining TB attributes as extra columns
+                for k, v in other_attrs.items():
+                    if k not in row:
+                        row[k] = v
+
+                rows.append(row)
+
+            # If no paper layouts, still list this DWG
+            if not found_paper:
+                rows.append({
+                    "DWG File": dwg_path.name,
+                    "Layout": "",
+                    "Sheet Number": "Not Found",
+                    "Sheet Name": "Not Found",
+                    "Revision Number": "Not Found",
+                    "Revision Date": "Not Found",
+                    "Revision Description": "Not Found",
+                    "Revision By": "Not Found",
+                    "Plot Successful": "No",
+                    "Status": "No Paper Layouts",
+                    "Error": "",
+                    "Individual PDF": ""
+                })
+
+        finally:
+            if doc is not None:
+                self.close_document(doc, save=False)
+
+        return generated
+
+
+# =========================
+# Drawing List CSV writer (dynamic columns)
+# =========================
+
+def write_drawing_list_csv(rows: list, output_csv: Path):
+    ensure_dir(output_csv.parent)
+    base_cols = [
+        "DWG File", "Layout",
+        "Sheet Number", "Sheet Name",
+        "Revision Number", "Revision Date", "Revision Description", "Revision By",
+        "Plot Successful", "Status", "Error", "Individual PDF"
+    ]
+    # collect union of extra headers
+    seen = set(base_cols)
+    extra_cols = []
+    for r in rows:
+        for k in r.keys():
+            if k not in seen:
+                seen.add(k)
+                extra_cols.append(k)
+    extra_cols_sorted = sorted(extra_cols)
+    headers = base_cols + extra_cols_sorted
+
+    with open(output_csv, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.DictWriter(f, fieldnames=headers)
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+
+    print(f"✓ Drawing List saved: {output_csv.name}")
+
 
 # =========================
 # Main
 # =========================
 
 def main():
-    print("DWG Copier and PDF Converter + Sheet List")
-    print("-----------------------------------------")
+    print("DWG Copier and PDF Converter + Drawing List (per layout)")
+    print("--------------------------------------------------------")
 
     # 1) Inputs
     input_dir = Path(select_directory_gui("Select INPUT folder (DWG source)")).resolve()
@@ -744,26 +789,31 @@ def main():
         sys.exit(1)
 
     combined_pdf_path = output_dir / f"{sanitize_filename(project_name)}_Combined.pdf"
-    all_pdfs: list[Path] = []
+    drawing_list_csv = output_dir / f"{sanitize_filename(project_name)}_Drawing List.csv"
+
+    all_pdfs = []
+    drawing_rows = []
 
     print("\nStarting AutoCAD for PDF generation...")
     try:
-        # visible=True can reduce COM rejections in some environments
         with AutoCADPdfConverter(pdf_pc3_name="DWG To PDF.pc3", visible=False) as converter:
-            print("\nGenerating Individual PDFs...")
+            print("\nGenerating Individual PDFs and building Drawing List...")
             total = len(copied)
             for idx, dwg in enumerate(copied, 1):
                 print(f"[{idx}/{total}] {dwg.name}")
-                generated = converter.convert_individual(dwg, individual_pdf_dir)
+                generated = converter.convert_individual_and_collect_rows(dwg, individual_pdf_dir, drawing_rows)
                 all_pdfs.extend(generated)
     except Exception as e:
         print(f"\nERROR: AutoCAD conversion failed: {e}")
+        # still write whatever rows we have
+        if drawing_rows:
+            write_drawing_list_csv(drawing_rows, drawing_list_csv)
         sys.exit(2)
 
-    # 5) Merge into single combined PDF
+    # 5) Merge PDFs into single combined PDF
     if all_pdfs:
         print(f"\nMerging {len(all_pdfs)} PDFs into one combined file...")
-        # Keep order stable by sorting by DWG name then layout name
+        # Keep order stable by DWG name then layout
         all_pdfs_sorted = sorted(all_pdfs, key=lambda p: (p.stem.split("__")[0].lower(), p.stem.lower()))
         try:
             merge_pdfs_in_order(all_pdfs_sorted, combined_pdf_path)
@@ -772,16 +822,8 @@ def main():
     else:
         print("\nNo PDFs generated to merge.")
 
-    # 6) Extract Sheet List from combined PDF
-    if PDFPLUMBER_AVAILABLE and PANDAS_AVAILABLE and combined_pdf_path.exists():
-        print("\nExtracting Sheet List from combined PDF...")
-        try:
-            df = extract_sheet_info(combined_pdf_path, crop_frac=0.22)
-            save_sheet_list(df, output_dir, project_name)
-        except Exception as e:
-            print(f"    ! Sheet List extraction failed: {e}")
-    else:
-        print("    ! Sheet List extraction skipped (pdfplumber/pandas not available or combined PDF missing).")
+    # 6) Write Drawing List (CSV)
+    write_drawing_list_csv(drawing_rows, drawing_list_csv)
 
     print("\nDone.")
 
