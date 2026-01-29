@@ -1,0 +1,95 @@
+# --------------------------
+# Logs (primary request)
+# --------------------------
+logs/
+*.log
+*.log.*
+
+# If you log per-run to timestamped files in a folder:
+run-logs/
+*.trace
+*.err
+*.out
+
+# --------------------------
+# Python bytecode / caches
+# --------------------------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pdm.toml
+*.python-version
+
+# --------------------------
+# Virtual environments (common names)
+# --------------------------
+.venv/
+venv/
+env/
+.conda/
+conda-env/
+
+# --------------------------
+# OS / Editor cruft
+# --------------------------
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.bak
+*.tmp
+.idea/
+.vscode/
+*.code-workspace
+
+# --------------------------
+# Packaging & build artifacts
+# --------------------------
+build/
+dist/
+*.egg-info/
+*.egg
+*.whl
+*.spec  # PyInstaller spec file (if generated)
+
+# --------------------------
+# Project run artifacts
+# (Outputs that should not be committed)
+# --------------------------
+
+# Combined PDFs the app creates
+*_Combined.pdf
+
+# The default subfolders created by the app under your chosen Output directory
+# If you ever run outputs inside the repo, these patterns keep the tree clean.
+Individual PDFs/
+DWG/
+
+# Safety net: ignore PDFs and DWGs anywhere under repo if they appear
+# (comment these two out if you DO want to track some PDFs/DWGs in source)
+*.pdf
+*.dwg
+
+# --------------------------
+# Environment / secrets
+# --------------------------
+*.env
+.env*
+*.key
+*.pem
+
+# --------------------------
+# Zip bundles or temp exports
+# --------------------------
+*.zip
+*.7z
+*.tar
+*.tar.gz
+
+# --------------------------
+# Coverage / test
+# --------------------------
+.coverage
+htmlcov/
+.pytest_cache/

@@ -6,17 +6,6 @@
   <component name="ChangeListManager">
     <list default="true" id="36a79711-050f-40f3-9b39-31293afb1351" name="Changes" comment="restructure code, OOP approach, increases extensibility, app.py for .exec generation">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/__init__.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/app.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/cad/__init__.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/cad/plotter.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/config.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/io/__init__.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/io/files.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/pdf/__init__.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/pdf/merge.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/titleblock/__init__.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/titleblock/scanner.py" beforeDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -51,18 +40,18 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent"><![CDATA[{
-  "keyToString": {
-    "ModuleVcsDetector.initialDetectionPerformed": "true",
-    "Python.app.executor": "Run",
-    "Python.main.executor": "Run",
-    "Python.run.executor": "Run",
-    "RunOnceActivity.ShowReadmeOnStart": "true",
-    "RunOnceActivity.git.unshallow": "true",
-    "git-widget-placeholder": "dev",
-    "junie.onboarding.icon.badge.shown": "true"
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
+    &quot;Python.app.executor&quot;: &quot;Run&quot;,
+    &quot;Python.main.executor&quot;: &quot;Run&quot;,
+    &quot;Python.run.executor&quot;: &quot;Run&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;dev&quot;,
+    &quot;junie.onboarding.icon.badge.shown&quot;: &quot;true&quot;
   }
-}]]></component>
+}</component>
   <component name="RunManager" selected="Python.run">
     <configuration name="main" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
       <module name="DWG-PDF-exp" />
